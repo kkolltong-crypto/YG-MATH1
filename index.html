@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>수학과 과세특 통합 도구</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -123,7 +124,7 @@
 <div class="tab-content active" id="tab-plan">
   <div class="panel">
     <h2>평가계획서 PDF 업로드</h2>
-    <div class="desc">평가계획서 PDF를 올리면 텍스트를 추출해 아래에 보여줍니다. 내용을 확인하며 아래 표를 직접 채우거나 수정하세요. (PDF에서 표 구조까지 자동으로 인식하지는 못합니다.)</div>
+    <div class="desc">평가계획서 PDF를 올리면 텍스트를 추출해 아래에 보여줍니다. 텍스트 레이어가 없는 스캔본 PDF는 자동으로 이미지 인식(OCR)으로 전환해 처리합니다. 내용을 확인하며 아래 표를 직접 채우거나 수정하세요. (PDF에서 표 구조까지 자동으로 인식하지는 못합니다.)</div>
     <input type="file" id="planPdfInput" accept="application/pdf">
     <div class="pdf-status" id="pdfStatus"></div>
     <label style="margin-top:12px;">추출된 텍스트 (참고용, 복사해서 아래 표 작성에 활용)</label>
@@ -716,26 +717,57 @@ renderOverviewTable();
 if (window['pdfjsLib']) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
+// 페이지의 텍스트 레이어가 이 길이보다 짧으면 스캔본(이미지)으로 보고 OCR로 전환
+const OCR_FALLBACK_THRESHOLD = 5;
+
+async function ocrPageImage(page){
+  const viewport = page.getViewport({scale: 2});
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext('2d');
+  await page.render({canvasContext: ctx, viewport}).promise;
+  const dataUrl = canvas.toDataURL('image/png');
+  const result = await Tesseract.recognize(dataUrl, 'kor+eng');
+  return (result && result.data && result.data.text || '').trim();
+}
+
 document.getElementById('planPdfInput').addEventListener('change', async (e)=>{
   const file = e.target.files[0]; if(!file) return;
   const statusEl = document.getElementById('pdfStatus');
   const textArea = document.getElementById('planPdfText');
-  statusEl.textContent = 'PDF 텍스트 추출 중...';
+  statusEl.textContent = 'PDF 분석 중...';
   textArea.value = '';
   try {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({data: buf}).promise;
     let fullText = '';
+    let ocrPageCount = 0;
     for (let p = 1; p <= pdf.numPages; p++) {
+      statusEl.textContent = `${p}/${pdf.numPages}페이지 텍스트 추출 중...`;
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
-      const pageText = content.items.map(it => it.str).join(' ');
-      fullText += `--- ${p}페이지 ---\n${pageText}\n\n`;
+      let pageText = content.items.map(it => it.str).join(' ').trim();
+      let usedOcr = false;
+
+      if (pageText.length < OCR_FALLBACK_THRESHOLD) {
+        // 텍스트 레이어가 거의 없음 → 스캔한 이미지 PDF로 판단, 자동으로 OCR 인식
+        statusEl.textContent = `${p}/${pdf.numPages}페이지: 텍스트 레이어가 없어 이미지(OCR)로 자동 인식 중... (시간이 걸릴 수 있습니다)`;
+        try {
+          pageText = await ocrPageImage(page);
+          usedOcr = true;
+          ocrPageCount++;
+        } catch(ocrErr) {
+          pageText = '(OCR 인식 실패: ' + ocrErr.message + ')';
+        }
+      }
+
+      fullText += `--- ${p}페이지${usedOcr ? ' (OCR 자동 인식)' : ''} ---\n${pageText}\n\n`;
     }
     textArea.value = fullText;
-    statusEl.textContent = `총 ${pdf.numPages}페이지에서 텍스트를 추출했습니다. 아래 표를 직접 채우거나 수정하세요.`;
+    statusEl.textContent = `총 ${pdf.numPages}페이지 분석 완료${ocrPageCount ? ` (이 중 ${ocrPageCount}페이지는 스캔본으로 판단되어 OCR로 자동 인식함)` : ''}. 아래 표를 직접 채우거나 수정하세요.`;
   } catch(err) {
-    statusEl.textContent = 'PDF 텍스트 추출에 실패했습니다: ' + err.message + ' (인터넷 연결이 필요합니다. 실패해도 아래 표는 직접 입력할 수 있습니다.)';
+    statusEl.textContent = 'PDF 인식에 실패했습니다: ' + err.message + ' (인터넷 연결이 필요합니다. 실패해도 아래 표는 직접 입력할 수 있습니다.)';
   }
 });
 
